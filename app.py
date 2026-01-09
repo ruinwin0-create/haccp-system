@@ -15,7 +15,6 @@ from googleapiclient.http import MediaIoBaseUpload
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
 DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG"
-# (주의: 로봇 키 파일은 코드에 직접 안 넣고 'Secrets'에서 가져옵니다)
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive.file'
@@ -23,17 +22,31 @@ SCOPES = [
 
 st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 
-# --- 2. 구글 연동 함수 (클라우드 로봇용) ---
+# --- 2. 구글 연동 함수 (디버깅 버전) ---
 @st.cache_resource
 def connect_google():
-    # Streamlit Secrets(금고)에서 로봇 키 내용을 가져옴
-    key_dict = json.loads(st.secrets["google_key_json"])
-    creds = service_account.Credentials.from_service_account_info(
-        key_dict, scopes=SCOPES
-    )
-    gc = gspread.authorize(creds)
-    drive_service = build('drive', 'v3', credentials=creds)
-    return gc, drive_service
+    # [디버깅] 금고에 무슨 키가 있는지 확인 (내용은 안 보여주고 이름만 확인)
+    if "google_key_json" not in st.secrets:
+        st.error("🚨 오류: 'google_key_json'이라는 이름표를 찾을 수 없습니다!")
+        st.warning(f"현재 금고에 있는 이름표들: {list(st.secrets.keys())}")
+        st.info("Secrets 맨 첫 줄이 'google_key_json = \"\"\"' 로 시작하는지 확인하세요.")
+        st.stop()
+
+    try:
+        # JSON 변환 시도
+        key_dict = json.loads(st.secrets["google_key_json"])
+        creds = service_account.Credentials.from_service_account_info(
+            key_dict, scopes=SCOPES
+        )
+        gc = gspread.authorize(creds)
+        drive_service = build('drive', 'v3', credentials=creds)
+        return gc, drive_service
+    except json.JSONDecodeError as e:
+        st.error(f"🚨 JSON 형식 오류: 복사/붙여넣기가 잘못되었습니다. ({e})")
+        st.stop()
+    except Exception as e:
+        st.error(f"🚨 인증 오류 발생: {e}")
+        st.stop()
 
 @st.cache_data(ttl=10)
 def load_data(_gc):
@@ -77,9 +90,9 @@ def compress_image(uploaded_file):
         image = Image.open(uploaded_file)
         image = ImageOps.exif_transpose(image)
         image = image.convert('RGB')
-        image.thumbnail((1024, 1024)) # 1024px로 리사이징
+        image.thumbnail((1024, 1024))
         output = io.BytesIO()
-        image.save(output, format='JPEG', quality=70) # 품질 70%
+        image.save(output, format='JPEG', quality=70)
         output.seek(0)
         output.name = uploaded_file.name
         output.type = 'image/jpeg'
@@ -96,7 +109,6 @@ def upload_photo(drive_service, uploaded_file):
     return file.get('webViewLink')
 
 def process_and_upload(gc, uploaded_file):
-    # (기존 업로드 로직 유지)
     try:
         if uploaded_file.name.endswith('.csv'): df_raw = pd.read_csv(uploaded_file)
         else: df_raw = pd.read_excel(uploaded_file)
@@ -168,7 +180,8 @@ try:
     gc, drive_service = connect_google()
     df = load_data(gc)
 except Exception as e:
-    st.error("🔐 설정 오류: 로봇 키(Secrets)가 올바르지 않습니다.")
+    # 여기가 핵심! 이제 그냥 멈추지 않고 상세 에러를 보여줌
+    st.error(f"❌ 접속 중단: {e}")
     st.stop()
 
 st.sidebar.markdown("## ☁️ 천안공장 위생 점검 (Cloud)")
@@ -187,7 +200,6 @@ with st.sidebar.expander("📂 엑셀 데이터 업로드"):
         st.rerun()
 
 st.sidebar.markdown("---")
-# (보고서 다운로드 기능 생략 - Cloud에서는 파일 생성 방식이 조금 다를 수 있어 단순화)
 if st.sidebar.button("🔄 새로고침"): st.rerun()
 
 if menu == "📊 대시보드":
