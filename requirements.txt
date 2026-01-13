@@ -10,3 +10,4 @@ altair
 openpyxl
 Pillow
 supabase
+supabase-py
