@@ -3,10 +3,8 @@ import pandas as pd
 import gspread
 import time
 import xlsxwriter
-import io
 import altair as alt
 from datetime import datetime
-from PIL import Image, ImageOps
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -14,7 +12,7 @@ from googleapiclient.http import MediaIoBaseUpload
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
 
-# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID
+# 구글 드라이브 폴더 ID
 DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
 
 # [권한 설정]
@@ -28,17 +26,14 @@ st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 # --- 2. 구글 연동 함수 ---
 @st.cache_resource
 def connect_google_final():
-    # Secrets에 키가 있는지 확인
     if "google_key_json" not in st.secrets:
         st.error("🚨 오류: Secrets 설정이 없습니다.")
         st.stop()
 
     try:
-        # Secrets에서 키 가져오기
         key_dict = dict(st.secrets["google_key_json"])
-        
-        # 👇 [추가됨] 화면 왼쪽에 로봇 이름을 표시합니다 (권한 확인용)
-        st.sidebar.warning(f"🤖 현재 로봇 ID: {key_dict.get('client_email')}")
+        # 연결 성공 여부 확인용 (사이드바에 표시)
+        st.sidebar.success(f"시스템 연결됨: {key_dict.get('client_email')}")
         
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=SCOPES
@@ -73,7 +68,6 @@ def load_data(_gc):
 
         return df
     except Exception as e:
-        st.error(f"데이터 로딩 실패: {e}")
         return pd.DataFrame()
 
 # [공통] 사진 다운로드 함수
@@ -90,38 +84,37 @@ def download_image_bytes(_drive_service, file_link):
         else:
             return None
 
-        # 이미지 데이터 가져오기
         return _drive_service.files().get_media(fileId=file_id).execute()
     except:
         return None
 
-# [공통] 이미지 압축 (용량 줄이기) - Pillow 라이브러리 필요
-def compress_image(uploaded_file):
-    try:
-        image = Image.open(uploaded_file)
-        image = ImageOps.exif_transpose(image) # 회전 방지
-        image = image.convert('RGB')
-        image.thumbnail((1024, 1024)) # 사이즈 줄이기
-        output = io.BytesIO()
-        image.save(output, format='JPEG', quality=70)
-        output.seek(0)
-        # 객체 속성 복구
-        output.name = uploaded_file.name
-        output.type = 'image/jpeg'
-        return output
-    except Exception as e:
-        st.warning(f"이미지 압축 실패(원본 사용): {e}")
-        return uploaded_file
-
-# [공통] 사진 업로드
+# [공통] 사진 업로드 (압축 없이 원본 그대로 업로드)
 def upload_photo(drive_service, uploaded_file):
     if uploaded_file is None: return ""
-    compressed_file = compress_image(uploaded_file)
-    # 파일 이름에 날짜 시간 붙여서 중복 방지
-    file_metadata = {'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 'parents': [DRIVE_FOLDER_ID]}
-    media = MediaIoBaseUpload(compressed_file, mimetype='image/jpeg')
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
-    return file.get('webViewLink')
+    
+    try:
+        # 파일 이름에 날짜 시간 붙여서 중복 방지
+        file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
+        
+        file_metadata = {
+            'name': file_name, 
+            'parents': [DRIVE_FOLDER_ID]
+        }
+        
+        # 압축 과정 없이 바로 업로드
+        media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
+        
+        file = drive_service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id, webViewLink'
+        ).execute()
+        
+        return file.get('webViewLink')
+    except Exception as e:
+        # 업로드 실패시 에러 메시지 반환
+        st.error(f"사진 업로드 실패: {e}")
+        return ""
 
 def process_and_upload(gc, uploaded_file):
     try:
@@ -222,29 +215,22 @@ if menu == "📊 대시보드":
         st.warning("데이터가 없습니다.")
     else:
         st.sidebar.markdown("### 📅 기간 필터")
-        years = sorted(df['Year'].dropna().unique())
-        year_options = [int(y) for y in years]
-        selected_years = st.sidebar.multiselect("연도", year_options, default=year_options)
-        
-        if selected_years: 
-            df = df[df['Year'].isin(selected_years)]
-            available_months = sorted(df['Month'].dropna().unique().astype(int))
-            month_options = [f"{m}월" for m in available_months]
-            selected_months_str = st.sidebar.multiselect("월", month_options, default=month_options)
+        if 'Year' in df.columns:
+            years = sorted(df['Year'].dropna().unique())
+            year_options = [int(y) for y in years]
+            selected_years = st.sidebar.multiselect("연도", year_options, default=year_options)
             
-            if selected_months_str:
-                selected_months = [int(m.replace("월", "")) for m in selected_months_str]
-                df = df[df['Month'].isin(selected_months)]
-                available_weeks = sorted(df['Week'].dropna().unique().astype(int))
-                week_options = [f"{w}주차" for w in available_weeks]
-                selected_weeks_str = st.sidebar.multiselect("주차(Week)", week_options, default=week_options)
+            if selected_years: 
+                df = df[df['Year'].isin(selected_years)]
+                available_months = sorted(df['Month'].dropna().unique().astype(int))
+                month_options = [f"{m}월" for m in available_months]
+                selected_months_str = st.sidebar.multiselect("월", month_options, default=month_options)
                 
-                if selected_weeks_str:
-                    selected_weeks = [int(w.replace("주차", "")) for w in selected_weeks_str]
-                    df = df[df['Week'].isin(selected_weeks)]
-                else: st.warning("주차를 선택해주세요.")
-            else: st.warning("월을 선택해주세요.")
-        else: st.warning("연도를 선택해주세요.")
+                if selected_months_str:
+                    selected_months = [int(m.replace("월", "")) for m in selected_months_str]
+                    df = df[df['Month'].isin(selected_months)]
+                else: st.warning("월을 선택해주세요.")
+            else: st.warning("연도를 선택해주세요.")
 
         m1, m2, m3 = st.columns(3)
         total_count = len(df)
@@ -256,7 +242,7 @@ if menu == "📊 대시보드":
         st.divider()
 
         c1, c2 = st.columns(2)
-        if len(selected_months_str) > 1: group_col, x_title = 'Month', "월"
+        if 'Month' in df.columns: group_col, x_title = 'Month', "월"
         else: group_col, x_title = '공정', "장소"
 
         chart_df = df.groupby(group_col).agg(
@@ -324,6 +310,7 @@ elif menu == "📝 문제 등록":
         pho = st.file_uploader("사진")
         if st.form_submit_button("저장"):
             with st.spinner('저장 중...'):
+                # 압축 없이 업로드 호출
                 lnk = upload_photo(drive_service, pho)
                 sh = gc.open_by_url(SPREADSHEET_URL)
                 new_id = int(time.time())
@@ -372,6 +359,7 @@ elif menu == "🛠️ 조치 입력":
                     else:
                         try:
                             with st.spinner('저장 중...'):
+                                # 압축 없이 업로드 호출
                                 lnk = upload_photo(drive_service, aph) if aph else ""
                                 sh = gc.open_by_url(SPREADSHEET_URL)
                                 ws = sh.sheet1
@@ -385,6 +373,5 @@ elif menu == "🛠️ 조치 입력":
                             time.sleep(2)
                             st.rerun()
                         except Exception as e:
-                            # 🚨 여기가 중요합니다! 무슨 에러인지 보여줍니다.
                             st.error(f"상세 에러 내용: {e}")
     else: st.info("조치할 항목이 없습니다.")
