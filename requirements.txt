@@ -6,5 +6,4 @@ google-auth-httplib2
 google-auth-oauthlib
 xlsxwriter
 altair
-Pillow
 openpyxl
