@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import pandas as pd
 import gspread
@@ -33,7 +34,7 @@ def require_secrets(keys, label="Secrets"):
         st.stop()
 
 # 시트는 유지한다고 했으니 google_key_json 필요
-require_secrets(["google_key_json"], "Google Sheets (google_key_json)")
+require_secrets(["GOOGLE_KEY_JSON_TEXT"], "Google Sheets (GOOGLE_KEY_JSON_TEXT)")
 require_secrets(["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_BUCKET"], "Supabase")
 
 
@@ -43,14 +44,13 @@ require_secrets(["SUPABASE_URL", "SUPABASE_ANON_KEY", "SUPABASE_BUCKET"], "Supab
 @st.cache_resource
 def connect_gspread():
     try:
-        key_dict = dict(st.secrets["google_key_json"])
+        key_dict = json.loads(st.secrets["GOOGLE_KEY_JSON_TEXT"])
         creds = service_account.Credentials.from_service_account_info(key_dict, scopes=SCOPES)
         gc = gspread.authorize(creds)
         return gc
     except Exception as e:
         st.error(f"🚨 Google 인증 오류: {e}")
         st.stop()
-
 
 # =========================
 # 4) Supabase 연결
