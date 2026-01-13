@@ -3,7 +3,7 @@ import pandas as pd
 import gspread
 import time
 import xlsxwriter
-import io  # 엑셀 다운로드를 위해 꼭 필요합니다
+import io
 import altair as alt
 from datetime import datetime
 from google.oauth2 import service_account
@@ -14,7 +14,6 @@ from googleapiclient.http import MediaIoBaseUpload
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
 DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
 
-# [권한 설정]
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive'
@@ -28,12 +27,9 @@ def connect_google_final():
     if "google_key_json" not in st.secrets:
         st.error("🚨 오류: Secrets 설정이 없습니다.")
         st.stop()
-
     try:
         key_dict = dict(st.secrets["google_key_json"])
-        creds = service_account.Credentials.from_service_account_info(
-            key_dict, scopes=SCOPES
-        )
+        creds = service_account.Credentials.from_service_account_info(key_dict, scopes=SCOPES)
         gc = gspread.authorize(creds)
         drive_service = build('drive', 'v3', credentials=creds)
         return gc, drive_service
@@ -48,66 +44,75 @@ def load_data(_gc):
         ws = sh.sheet1
         data = ws.get_all_records(value_render_option='UNFORMATTED_VALUE')
         df = pd.DataFrame(data)
-        
         if df.empty: return pd.DataFrame()
         
+        # 날짜 컬럼 정리
         if '일시' in df.columns:
             df['일시'] = df['일시'].astype(str).str.replace('.', '-', regex=False).str.strip()
             df['일시'] = pd.to_datetime(df['일시'], errors='coerce')
-            df['일시'] = df['일시'].fillna(pd.Timestamp('1900-01-01'))
             df['Year'] = df['일시'].dt.year
             df['Month'] = df['일시'].dt.month
             df['Week'] = df['일시'].dt.isocalendar().week
         
         if '개선 필요사항' in df.columns:
             df = df[df['개선 필요사항'].astype(str).str.strip() != '']
-
         return df
     except Exception as e:
         st.error(f"데이터 로딩 실패: {e}")
         return pd.DataFrame()
 
-# [공통] 사진 다운로드 함수
+# [공통] 사진 다운로드 (대시보드 보기용)
 @st.cache_data(show_spinner=False)
 def download_image_bytes(_drive_service, file_link):
     if not isinstance(file_link, str) or "drive.google.com" not in file_link:
         return None
-        
     try:
-        if "/d/" in file_link:
-            file_id = file_link.split("/d/")[1].split("/")[0]
-        elif "id=" in file_link:
-            file_id = file_link.split("id=")[1].split("&")[0]
-        else:
-            return None
+        if "/d/" in file_link: file_id = file_link.split("/d/")[1].split("/")[0]
+        elif "id=" in file_link: file_id = file_link.split("id=")[1].split("&")[0]
+        else: return None
         return _drive_service.files().get_media(fileId=file_id).execute()
-    except:
-        return None
+    except: return None
 
-# [공통] 사진 업로드 (압축 없이 원본 업로드)
+# [공통] 사진 업로드 (원본 업로드 - 502 에러 방지)
 def upload_photo(drive_service, uploaded_file):
     if uploaded_file is None: return ""
     try:
-        file_metadata = {
-            'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 
-            'parents': [DRIVE_FOLDER_ID]
-        }
+        file_metadata = {'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 'parents': [DRIVE_FOLDER_ID]}
         media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
-        file = drive_service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            fields='id, webViewLink'
-        ).execute()
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute()
         return file.get('webViewLink')
     except Exception as e:
         st.error(f"사진 업로드 실패: {e}")
         return ""
 
-# [기능 추가] 엑셀 다운로드용 변환 함수
+# [핵심 수정] 엑셀 다운로드 포맷 정리 (날짜/링크 문제 해결)
 def convert_df_to_excel(df):
     output = io.BytesIO()
+    # 엑셀로 내보내기 전, 날짜를 문자로 강제 변환하여 숫자로 나오는 문제 해결
+    export_df = df.copy()
+    
+    # 1. 날짜 포맷팅 (숫자로 나오는 것 방지)
+    if '일시' in export_df.columns:
+        export_df['일시'] = export_df['일시'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notnull(x) and not isinstance(x, str) else str(x))
+    
+    if '개선완료일' in export_df.columns:
+        export_df['개선완료일'] = export_df['개선완료일'].astype(str).replace({'NaT': '', 'nan': ''})
+    
+    # 불필요한 분석용 컬럼 제거
+    cols_to_drop = ['Year', 'Month', 'Week', 'ID']
+    export_df = export_df.drop(columns=[c for c in cols_to_drop if c in export_df.columns], errors='ignore')
+
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Sheet1')
+        export_df.to_excel(writer, index=False, sheet_name='점검일지')
+        workbook = writer.book
+        worksheet = writer.sheets['점검일지']
+        
+        # 2. 스타일 설정 (헤더 강조, 컬럼 너비)
+        header_fmt = workbook.add_format({'bold': True, 'align': 'center', 'bg_color': '#D3D3D3', 'border': 1})
+        for col_num, value in enumerate(export_df.columns.values):
+            worksheet.write(0, col_num, value, header_fmt)
+            worksheet.set_column(col_num, col_num, 15) # 너비 자동 조정
+
     return output.getvalue()
 
 def process_and_upload(gc, uploaded_file):
@@ -206,13 +211,13 @@ if st.sidebar.button("🔄 새로고침"): st.rerun()
 if menu == "📊 대시보드":
     st.markdown("### 📊 천안공장 위생점검 현황")
     
-    # [복구됨] 엑셀 다운로드 버튼
+    # 엑셀 다운로드 버튼 (개선된 버전)
     if not df.empty:
         col_btn, _ = st.columns([1, 4])
         with col_btn:
             excel_data = convert_df_to_excel(df)
             st.download_button(
-                label="💾 전체 데이터 다운로드 (Excel)",
+                label="💾 엑셀 다운로드 (서식 적용됨)",
                 data=excel_data,
                 file_name=f"위생점검_데이터_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
