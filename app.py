@@ -1,3 +1,7 @@
+import reprlib
+st.write("GOOGLE_KEY_JSON_TEXT repr:")
+st.code(reprlib.repr(st.secrets["GOOGLE_KEY_JSON_TEXT"]))
+st.stop()
 import streamlit as st
 import pandas as pd
 import time
