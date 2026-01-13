@@ -3,8 +3,10 @@ import pandas as pd
 import gspread
 import time
 import xlsxwriter
+import io
 import altair as alt
 from datetime import datetime
+# from PIL import Image, ImageOps  <-- 이 줄 삭제됨 (에러 원인)
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -12,7 +14,7 @@ from googleapiclient.http import MediaIoBaseUpload
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
 
-# 구글 드라이브 폴더 ID
+# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID
 DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
 
 # [권한 설정]
@@ -87,30 +89,28 @@ def download_image_bytes(_drive_service, file_link):
     except:
         return None
 
-# [공통] 사진 업로드 (압축 제거 -> 원본 업로드)
+# [삭제됨] compress_image 함수 삭제 (502 에러 원인)
+
+# [공통] 사진 업로드 (수정됨: 압축 없이 원본 업로드)
 def upload_photo(drive_service, uploaded_file):
     if uploaded_file is None: return ""
     
-    # 2. 압축 과정 삭제됨 -> 바로 업로드 준비
-    try:
-        file_metadata = {
-            'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 
-            'parents': [DRIVE_FOLDER_ID]
-        }
-        
-        # 파일 형식 그대로 인식해서 업로드
-        media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
-        
-        file = drive_service.files().create(
-            body=file_metadata, 
-            media_body=media, 
-            fields='id, webViewLink'
-        ).execute()
-        
-        return file.get('webViewLink')
-    except Exception as e:
-        st.error(f"사진 업로드 실패: {e}")
-        return ""
+    # 압축 과정 없이 바로 업로드 정보 생성
+    file_metadata = {
+        'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 
+        'parents': [DRIVE_FOLDER_ID]
+    }
+    
+    # 원본 파일 그대로 업로드 (mimetype 자동 인식)
+    media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
+    
+    file = drive_service.files().create(
+        body=file_metadata, 
+        media_body=media, 
+        fields='id, webViewLink'
+    ).execute()
+    
+    return file.get('webViewLink')
 
 def process_and_upload(gc, uploaded_file):
     try:
@@ -211,22 +211,29 @@ if menu == "📊 대시보드":
         st.warning("데이터가 없습니다.")
     else:
         st.sidebar.markdown("### 📅 기간 필터")
-        if 'Year' in df.columns:
-            years = sorted(df['Year'].dropna().unique())
-            year_options = [int(y) for y in years]
-            selected_years = st.sidebar.multiselect("연도", year_options, default=year_options)
+        years = sorted(df['Year'].dropna().unique())
+        year_options = [int(y) for y in years]
+        selected_years = st.sidebar.multiselect("연도", year_options, default=year_options)
+        
+        if selected_years: 
+            df = df[df['Year'].isin(selected_years)]
+            available_months = sorted(df['Month'].dropna().unique().astype(int))
+            month_options = [f"{m}월" for m in available_months]
+            selected_months_str = st.sidebar.multiselect("월", month_options, default=month_options)
             
-            if selected_years: 
-                df = df[df['Year'].isin(selected_years)]
-                available_months = sorted(df['Month'].dropna().unique().astype(int))
-                month_options = [f"{m}월" for m in available_months]
-                selected_months_str = st.sidebar.multiselect("월", month_options, default=month_options)
+            if selected_months_str:
+                selected_months = [int(m.replace("월", "")) for m in selected_months_str]
+                df = df[df['Month'].isin(selected_months)]
+                available_weeks = sorted(df['Week'].dropna().unique().astype(int))
+                week_options = [f"{w}주차" for w in available_weeks]
+                selected_weeks_str = st.sidebar.multiselect("주차(Week)", week_options, default=week_options)
                 
-                if selected_months_str:
-                    selected_months = [int(m.replace("월", "")) for m in selected_months_str]
-                    df = df[df['Month'].isin(selected_months)]
-                else: st.warning("월을 선택해주세요.")
-            else: st.warning("연도를 선택해주세요.")
+                if selected_weeks_str:
+                    selected_weeks = [int(w.replace("주차", "")) for w in selected_weeks_str]
+                    df = df[df['Week'].isin(selected_weeks)]
+                else: st.warning("주차를 선택해주세요.")
+            else: st.warning("월을 선택해주세요.")
+        else: st.warning("연도를 선택해주세요.")
 
         m1, m2, m3 = st.columns(3)
         total_count = len(df)
@@ -238,7 +245,7 @@ if menu == "📊 대시보드":
         st.divider()
 
         c1, c2 = st.columns(2)
-        if 'Month' in df.columns: group_col, x_title = 'Month', "월"
+        if len(selected_months_str) > 1: group_col, x_title = 'Month', "월"
         else: group_col, x_title = '공정', "장소"
 
         chart_df = df.groupby(group_col).agg(
