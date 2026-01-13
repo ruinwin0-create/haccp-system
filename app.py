@@ -1,7 +1,5 @@
 import streamlit as st
 import pandas as pd
-st.write("secrets keys:", list(st.secrets.keys()))
-
 import gspread
 import time
 import xlsxwriter
@@ -15,15 +13,6 @@ from googleapiclient.http import MediaIoBaseUpload
 
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
-
-# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID와 똑같은지 꼭 확인하세요!
-DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
-
-# [권한 설정] .file을 뺀 'drive' 권한 (업로드/다운로드/삭제 모두 가능)
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-]
 
 st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 
