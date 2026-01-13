@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+st.write("secrets keys:", list(st.secrets.keys()))
+
 import gspread
 import time
 import xlsxwriter
