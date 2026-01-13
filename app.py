@@ -881,73 +881,73 @@ elif menu == "📦 엑셀 출력":
                 )
 
 
-# =========================================================
-# F) 보고서(주간/월간/기간)
-# =========================================================
-elif menu == "🧾 보고서(주간/월간)":
-    st.markdown("### 🧾 보고서 출력 (주간/월간/기간 선택)")
-    if df.empty:
-        st.info("데이터가 없습니다.")
-    else:
-        mode = st.radio("보고서 단위", ["주간", "월간", "기간(직접선택)"], horizontal=True)
+# # =========================================================
+# # F) 보고서(주간/월간/기간)
+# # =========================================================
+# elif menu == "🧾 보고서(주간/월간)":
+#     st.markdown("### 🧾 보고서 출력 (주간/월간/기간 선택)")
+#     if df.empty:
+#         st.info("데이터가 없습니다.")
+#     else:
+#         mode = st.radio("보고서 단위", ["주간", "월간", "기간(직접선택)"], horizontal=True)
 
-        dff = df.copy()
+#         dff = df.copy()
 
-        # 기간 선택
-        if mode == "주간":
-            years = sorted(dff["Year"].dropna().unique().tolist())
-            y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
-            tmp = dff[dff["Year"] == y]
-            weeks = sorted(tmp["Week"].dropna().unique().tolist())
-            w = st.selectbox("주차(ISO Week)", weeks, index=len(weeks) - 1 if weeks else 0)
-            df_period = dff[(dff["Year"] == y) & (dff["Week"] == w)].copy()
-            period_text = f"{y}년 {w}주차"
+#         # 기간 선택
+#         if mode == "주간":
+#             years = sorted(dff["Year"].dropna().unique().tolist())
+#             y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
+#             tmp = dff[dff["Year"] == y]
+#             weeks = sorted(tmp["Week"].dropna().unique().tolist())
+#             w = st.selectbox("주차(ISO Week)", weeks, index=len(weeks) - 1 if weeks else 0)
+#             df_period = dff[(dff["Year"] == y) & (dff["Week"] == w)].copy()
+#             period_text = f"{y}년 {w}주차"
 
-        elif mode == "월간":
-            years = sorted(dff["Year"].dropna().unique().tolist())
-            y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
-            tmp = dff[dff["Year"] == y]
-            months = sorted(tmp["Month"].dropna().unique().tolist())
-            m = st.selectbox("월", months, index=len(months) - 1 if months else 0)
-            df_period = dff[(dff["Year"] == y) & (dff["Month"] == m)].copy()
-            period_text = f"{y}년 {m}월"
+#         elif mode == "월간":
+#             years = sorted(dff["Year"].dropna().unique().tolist())
+#             y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
+#             tmp = dff[dff["Year"] == y]
+#             months = sorted(tmp["Month"].dropna().unique().tolist())
+#             m = st.selectbox("월", months, index=len(months) - 1 if months else 0)
+#             df_period = dff[(dff["Year"] == y) & (dff["Month"] == m)].copy()
+#             period_text = f"{y}년 {m}월"
 
-        else:
-            start = st.date_input("시작일", value=date.today().replace(day=1))
-            end = st.date_input("종료일", value=date.today())
-            df_period = dff[(dff["일시"] >= pd.to_datetime(start)) & (dff["일시"] <= pd.to_datetime(end))].copy()
-            period_text = f"{start} ~ {end}"
+#         else:
+#             start = st.date_input("시작일", value=date.today().replace(day=1))
+#             end = st.date_input("종료일", value=date.today())
+#             df_period = dff[(dff["일시"] >= pd.to_datetime(start)) & (dff["일시"] <= pd.to_datetime(end))].copy()
+#             period_text = f"{start} ~ {end}"
 
-        # 미리보기 KPI/그래프/표
-        total, done, rate = make_summary(df_period)
-        st.info(f"기간: {period_text} | 총 발굴 {total}건 / 개선완료 {done}건 / 개선율 {rate}%")
+#         # 미리보기 KPI/그래프/표
+#         total, done, rate = make_summary(df_period)
+#         st.info(f"기간: {period_text} | 총 발굴 {total}건 / 개선완료 {done}건 / 개선율 {rate}%")
 
-        room_df = make_room_stats(df_period)
+#         room_df = make_room_stats(df_period)
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**총 발굴 vs 개선완료**")
-            fig = plot_counts(total, done, title="총 발굴 vs 개선완료")
-            st.pyplot(fig)
-        with c2:
-            st.markdown("**실/장소별 발굴/완료 (상위 12)**")
-            fig = plot_room_bars(room_df, title="실/장소별 발굴/완료 (상위 12)")
-            st.pyplot(fig)
+#         c1, c2 = st.columns(2)
+#         with c1:
+#             st.markdown("**총 발굴 vs 개선완료**")
+#             fig = plot_counts(total, done, title="총 발굴 vs 개선완료")
+#             st.pyplot(fig)
+#         with c2:
+#             st.markdown("**실/장소별 발굴/완료 (상위 12)**")
+#             fig = plot_room_bars(room_df, title="실/장소별 발굴/완료 (상위 12)")
+#             st.pyplot(fig)
 
-        st.markdown("**실/장소별 요약**")
-        st.dataframe(room_df, hide_index=True, use_container_width=True)
+#         st.markdown("**실/장소별 요약**")
+#         st.dataframe(room_df, hide_index=True, use_container_width=True)
 
-        st.divider()
+#         st.divider()
 
-        # 보고서 다운로드(HTML)
-        report_title = "천안공장 위생점검 보고서"
-        html = build_report_html(report_title, period_text, df_period)
+#         # 보고서 다운로드(HTML)
+#         report_title = "천안공장 위생점검 보고서"
+#         html = build_report_html(report_title, period_text, df_period)
 
-        st.download_button(
-            "⬇️ 보고서 다운로드 (HTML)",
-            data=html.encode("utf-8"),
-            file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-            mime="text/html"
-        )
+#         st.download_button(
+#             "⬇️ 보고서 다운로드 (HTML)",
+#             data=html.encode("utf-8"),
+#             file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+#             mime="text/html"
+#         )
 
         st.caption("HTML 파일은 브라우저에서 열어 인쇄(PDF 저장)하면 보고서로 바로 제출 가능합니다.")
