@@ -5,12 +5,10 @@ import io
 import json
 import re
 import urllib.request
-# import base64
 from datetime import datetime, date
-from PIL import Image, ImageOps
 
 import altair as alt
-# import matplotlib.pyplot as plt
+from PIL import Image, ImageOps
 
 import gspread
 from google.oauth2 import service_account
@@ -21,13 +19,13 @@ from supabase import create_client
 
 
 # =========================================================
-# 0) 기본 설정
+# 0) 설정
 # =========================================================
 st.set_page_config(page_title="천안공장 HACCP", layout="wide")
 
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
 
-# Drive 기존 사진(링크) -> Supabase 이전(매칭) 기능을 위해 readonly 필요
+# ✅ readonly만 (기존 Drive 사진 “이전(매칭)”을 하려면 drive.readonly 필요)
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive.readonly",
@@ -46,11 +44,9 @@ def require_secrets():
 require_secrets()
 
 
-# =========================================================
-# 1) Google / Supabase 연결
-# =========================================================
 @st.cache_resource
 def connect_google():
+    # GOOGLE_KEY_JSON_TEXT는 secrets에 """{...json...}""" 형태로 저장
     key_dict = json.loads(st.secrets["GOOGLE_KEY_JSON_TEXT"])
     creds = service_account.Credentials.from_service_account_info(key_dict, scopes=SCOPES)
     gc = gspread.authorize(creds)
@@ -59,17 +55,17 @@ def connect_google():
 
 
 @st.cache_resource
-def get_supabase():
+def connect_supabase():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_ANON_KEY"])
 
 
 gc, drive_service = connect_google()
-sb = get_supabase()
+sb = connect_supabase()
 BUCKET = st.secrets["SUPABASE_BUCKET"]
 
 
 # =========================================================
-# 2) 시트 컬럼 보강(자동 생성) - 오류 줄이기 핵심
+# 1) 시트 컬럼 자동 보강 (오류 최소 핵심)
 # =========================================================
 REQUIRED_COLUMNS = [
     "ID", "일시", "공정", "개선 필요사항",
@@ -87,10 +83,8 @@ def ensure_sheet_columns(ws):
 
     header = values[0]
     missing = [c for c in REQUIRED_COLUMNS if c not in header]
-    if not missing:
-        return
-
-    ws.update("A1", [header + missing])
+    if missing:
+        ws.update("A1", [header + missing])
 
 
 def col_index(ws, col_name: str) -> int:
@@ -99,7 +93,7 @@ def col_index(ws, col_name: str) -> int:
 
 
 # =========================================================
-# 3) 데이터 로딩
+# 2) 데이터 로딩
 # =========================================================
 @st.cache_data(ttl=10)
 def load_data():
@@ -112,19 +106,19 @@ def load_data():
     if df.empty:
         return df
 
-    # 타입 정리
     df["ID"] = df["ID"].astype(str)
 
-    if "일시" in df.columns:
-        df["일시"] = df["일시"].astype(str).str.replace(".", "-", regex=False).str.strip()
-        df["일시"] = pd.to_datetime(df["일시"], errors="coerce")
-    else:
-        df["일시"] = pd.NaT
+    # 날짜 처리
+    df["일시"] = df.get("일시", "").astype(str).str.replace(".", "-", regex=False).str.strip()
+    df["일시"] = pd.to_datetime(df["일시"], errors="coerce")
 
-    df["진행상태"] = df.get("진행상태", "미배정").astype(str).str.strip().replace({"": "미배정"})
+    # 진행상태 기본값
+    df["진행상태"] = df.get("진행상태", "").astype(str).str.strip()
+    df.loc[df["진행상태"] == "", "진행상태"] = "미배정"
+
     df["공정"] = df.get("공정", "").astype(str).str.strip()
 
-    # 필터/보고서에 필요한 파생
+    # 보고서/필터용 파생
     df["Year"] = df["일시"].dt.year
     df["Month"] = df["일시"].dt.month
     df["Week"] = df["일시"].dt.isocalendar().week.astype("Int64")
@@ -133,10 +127,9 @@ def load_data():
 
 
 # =========================================================
-# 4) 이미지: 압축/리사이즈 (안정)
+# 3) 사진: 압축/리사이즈 + Supabase 업로드/삭제
 # =========================================================
 def compress_images(files, max_side=1280, quality=68):
-    """UploadedFile list -> list of (bytes, filename)"""
     out = []
     for f in files or []:
         try:
@@ -150,6 +143,7 @@ def compress_images(files, max_side=1280, quality=68):
             name = re.sub(r"\s+", "_", getattr(f, "name", f"img_{int(time.time())}.jpg"))
             out.append((buf.read(), name))
         except Exception:
+            # fallback
             try:
                 f.seek(0)
                 out.append((f.read(), getattr(f, "name", f"img_{int(time.time())}")))
@@ -158,9 +152,6 @@ def compress_images(files, max_side=1280, quality=68):
     return out
 
 
-# =========================================================
-# 5) Supabase Storage 업로드/삭제/URL 처리
-# =========================================================
 def make_path(prefix, filename):
     safe = re.sub(r"[^a-zA-Z0-9._-]", "_", filename)
     return f"{prefix}/{datetime.now().strftime('%Y/%m/%d')}/{int(time.time())}_{safe}"
@@ -171,22 +162,12 @@ def public_url(path):
 
 
 def upload_many(prefix, uploaded_files):
-    """
-    여러 장 업로드 -> 저장 형식:
-      path|url
-      path|url
-      ...
-    """
     items = compress_images(uploaded_files)
     saved = []
     for content, name in items:
         path = make_path(prefix, name)
         try:
-            sb.storage.from_(BUCKET).upload(
-                path,
-                content,
-                {"content-type": "image/jpeg", "upsert": False},
-            )
+            sb.storage.from_(BUCKET).upload(path, content, {"content-type": "image/jpeg", "upsert": False})
             saved.append(f"{path}|{public_url(path)}")
         except Exception as e:
             st.error(f"📸 업로드 실패: {e}")
@@ -194,11 +175,6 @@ def upload_many(prefix, uploaded_files):
 
 
 def parse_photo_field(text):
-    """
-    사진 필드:
-    - Supabase: path|url 줄바꿈 여러개
-    - Drive/기타: url 줄바꿈 여러개
-    """
     if not text:
         return []
     lines = [l.strip() for l in str(text).splitlines() if l.strip()]
@@ -222,7 +198,7 @@ def delete_supabase_path(path):
 
 
 # =========================================================
-# 6) Drive 링크 -> 다운로드(이전사진 매칭용)
+# 4) Drive 링크 -> bytes (기존 사진 매칭/이전용)
 # =========================================================
 def extract_drive_file_id(url):
     if not url or "drive.google.com" not in url:
@@ -244,9 +220,6 @@ def download_drive_bytes(file_id):
 
 
 def migrate_drive_photos_to_supabase(ws, row_id, col_name):
-    """
-    특정 row의 특정 컬럼(사진_전/사진_후)에서 drive 링크를 찾아 Supabase로 업로드 후 교체.
-    """
     cell = ws.find(str(row_id))
     row = cell.row
     target_col = col_index(ws, col_name)
@@ -287,7 +260,7 @@ def migrate_drive_photos_to_supabase(ws, row_id, col_name):
 
 
 # =========================================================
-# 7) 엑셀 출력(사진 포함) - 첫 장만 삽입(안정성)
+# 5) 엑셀 출력(사진 포함) - 안정: 전/후 “첫 장만”
 # =========================================================
 def fetch_image_bytes(url):
     try:
@@ -297,18 +270,12 @@ def fetch_image_bytes(url):
         return None
 
 
-def build_excel_with_images(df):
+def build_excel_with_images(df_export: pd.DataFrame):
     output = io.BytesIO()
     wb = xlsxwriter.Workbook(output, {"in_memory": True})
     wsx = wb.add_worksheet("HACCP")
 
-    headers = [
-        "ID", "일시", "공정", "개선 필요사항",
-        "발견자", "담당자", "진행상태",
-        "개선계획(일정)", "개선내용", "개선완료일",
-        "사진_전", "사진_후"
-    ]
-
+    headers = REQUIRED_COLUMNS[:]  # 그대로
     header_fmt = wb.add_format({"bold": True, "bg_color": "#F2F2F2", "border": 1})
     cell_fmt = wb.add_format({"border": 1, "valign": "top", "text_wrap": True})
 
@@ -321,16 +288,16 @@ def build_excel_with_images(df):
 
     wsx.set_default_row(92)
 
-    for r, row in enumerate(df.to_dict("records"), start=1):
+    rows = df_export.to_dict("records")
+    for r, row in enumerate(rows, start=1):
         for c, h in enumerate(headers):
             if h in ["사진_전", "사진_후"]:
                 wsx.write(r, c, "", cell_fmt)
-                continue
-            v = row.get(h, "")
-            wsx.write(r, c, v, cell_fmt)
+            else:
+                wsx.write(r, c, row.get(h, ""), cell_fmt)
 
-        # 사진은 각 필드의 "첫 장"만 삽입
-        for h, col in [("사진_전", 10), ("사진_후", 11)]:
+        # 사진: 첫 장만 삽입
+        for h, col in [("사진_전", headers.index("사진_전")), ("사진_후", headers.index("사진_후"))]:
             items = parse_photo_field(row.get(h, ""))
             if not items:
                 continue
@@ -348,84 +315,66 @@ def build_excel_with_images(df):
 
 
 # =========================================================
-# 8) 보고서(HTML) 생성 - 주간/월간/기간 + 그래프 + 실별
+# 6) 보고서(HTML) - 브라우저가 그래프 렌더링 (설치 오류 0)
 # =========================================================
-def fig_to_base64(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
-
-
-def make_summary(df_period):
-    total = len(df_period)
-    done = (df_period["진행상태"] == "완료").sum() if total else 0
-    rate = round(done / total * 100, 1) if total else 0.0
-    return total, done, rate
-
-
-def make_room_stats(df_period):
+def room_stats(df_period):
     if df_period.empty:
         return pd.DataFrame(columns=["공정", "총발굴", "개선완료", "개선율(%)"])
     g = df_period.groupby("공정").agg(
         총발굴=("ID", "count"),
-        개선완료=("진행상태", lambda x: (x == "완료").sum()),
+        개선완료=("진행상태", lambda x: (x == "완료").sum())
     ).reset_index()
     g["개선율(%)"] = (g["개선완료"] / g["총발굴"] * 100).fillna(0).round(1)
     return g.sort_values(["개선율(%)", "총발굴"], ascending=[False, False])
 
 
-def plot_counts(total, done, title="요약"):
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    ax.bar(["총 발굴건수", "개선완료건수"], [total, done])
-    ax.set_title(title)
-    ax.set_ylabel("건수")
-    return fig
-
-
-def plot_room_bars(room_df, title="실/장소별 현황 (발굴/완료)"):
-    # 상위 12개만(너무 많으면 보고서가 난잡해짐)
-    d = room_df.copy()
-    if len(d) > 12:
-        d = d.head(12)
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111)
-    x = range(len(d))
-    ax.bar([i - 0.2 for i in x], d["총발굴"].tolist(), width=0.4, label="총발굴")
-    ax.bar([i + 0.2 for i in x], d["개선완료"].tolist(), width=0.4, label="개선완료")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(d["공정"].tolist(), rotation=45, ha="right")
-    ax.set_title(title)
-    ax.set_ylabel("건수")
-    ax.legend()
-    return fig
-
-
 def build_report_html(title, period_text, df_period):
-    total, done, rate = make_summary(df_period)
-    room_df = make_room_stats(df_period)
+    total = len(df_period)
+    done = int((df_period["진행상태"] == "완료").sum()) if total else 0
+    rate = round(done / total * 100, 1) if total else 0.0
 
-    # 그래프 생성
-    fig1 = plot_counts(total, done, title="총 발굴 vs 개선완료")
-    img1 = fig_to_base64(fig1)
+    rs = room_stats(df_period).head(20)
 
-    fig2 = plot_room_bars(room_df, title="실/장소별 발굴/완료 (상위 12)")
-    img2 = fig_to_base64(fig2)
+    # Vega-Lite spec 2개 (요약/실별)
+    # 1) summary
+    summary_data = [
+        {"항목": "총 발굴건수", "건수": total},
+        {"항목": "개선완료건수", "건수": done},
+    ]
+    spec1 = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "data": {"values": summary_data},
+        "mark": "bar",
+        "encoding": {
+            "x": {"field": "항목", "type": "nominal", "axis": {"labelAngle": 0}},
+            "y": {"field": "건수", "type": "quantitative"},
+            "tooltip": [{"field": "항목"}, {"field": "건수"}],
+        },
+        "title": "총 발굴 vs 개선완료",
+    }
 
-    # 표(상위 20)
-    room_table = room_df.head(20).to_html(index=False)
+    # 2) room bars
+    room_data = rs.to_dict("records")
+    spec2 = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "data": {"values": room_data},
+        "mark": "bar",
+        "encoding": {
+            "x": {"field": "공정", "type": "nominal", "sort": "-y", "axis": {"labelAngle": -35}},
+            "y": {"field": "총발굴", "type": "quantitative"},
+            "tooltip": [{"field": "공정"}, {"field": "총발굴"}, {"field": "개선완료"}, {"field": "개선율(%)"}],
+        },
+        "title": "실/장소별 총 발굴(상위 20)",
+    }
 
-    # 상세(최근 30건)
+    # 상세 30건
     detail_cols = ["일시", "공정", "개선 필요사항", "발견자", "담당자", "진행상태", "개선계획(일정)", "개선완료일"]
-    detail_df = df_period.copy()
-    detail_df = detail_df.sort_values("일시", ascending=False).head(30)
-    # 날짜 문자열 처리
-    if "일시" in detail_df.columns:
-        detail_df["일시"] = detail_df["일시"].dt.strftime("%Y-%m-%d")
-    detail_table = detail_df[detail_cols].to_html(index=False)
+    d = df_period.sort_values("일시", ascending=False).head(30).copy()
+    if "일시" in d.columns:
+        d["일시"] = d["일시"].dt.strftime("%Y-%m-%d")
+    detail_html = d[detail_cols].to_html(index=False)
+
+    room_html = rs.to_html(index=False)
 
     html = f"""
 <!doctype html>
@@ -435,20 +384,22 @@ def build_report_html(title, period_text, df_period):
 <title>{title}</title>
 <style>
 body {{ font-family: Arial, sans-serif; margin: 24px; }}
-h1 {{ margin-bottom: 4px; }}
-.small {{ color: #666; margin-bottom: 16px; }}
-.card {{ border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin: 10px 0; }}
+.small {{ color:#666; margin-bottom: 12px; }}
+.card {{ border:1px solid #ddd; border-radius:10px; padding:14px; margin:12px 0; }}
 .kpi {{ display:flex; gap:12px; }}
-.kpi div {{ flex: 1; border:1px solid #eee; border-radius: 10px; padding:12px; }}
+.kpi div {{ flex:1; border:1px solid #eee; border-radius:10px; padding:12px; }}
 table {{ border-collapse: collapse; width: 100%; }}
-th, td {{ border: 1px solid #ddd; padding: 6px; vertical-align: top; }}
-th {{ background: #f5f5f5; }}
-img {{ max-width: 100%; }}
+th, td {{ border:1px solid #ddd; padding:6px; vertical-align: top; }}
+th {{ background:#f5f5f5; }}
 </style>
+
+<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
 </head>
 <body>
 <h1>{title}</h1>
-<div class="small">기간: {period_text} / 생성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
+<div class="small">기간: {period_text} / 생성: {datetime.now().strftime('%Y-%m-%d %H:%M')}</div>
 
 <div class="card">
   <h2>요약</h2>
@@ -461,21 +412,27 @@ img {{ max-width: 100%; }}
 
 <div class="card">
   <h2>그래프</h2>
-  <h3>총 발굴 vs 개선완료</h3>
-  <img src="data:image/png;base64,{img1}">
-  <h3 style="margin-top:16px;">실/장소별 현황</h3>
-  <img src="data:image/png;base64,{img2}">
+  <div id="chart1"></div>
+  <div style="height:18px"></div>
+  <div id="chart2"></div>
 </div>
 
 <div class="card">
   <h2>실/장소별 요약(상위 20)</h2>
-  {room_table}
+  {room_html}
 </div>
 
 <div class="card">
   <h2>상세 내역(최근 30건)</h2>
-  {detail_table}
+  {detail_html}
 </div>
+
+<script>
+const spec1 = {json.dumps(spec1, ensure_ascii=False)};
+const spec2 = {json.dumps(spec2, ensure_ascii=False)};
+vegaEmbed("#chart1", spec1, {{actions:false}});
+vegaEmbed("#chart2", spec2, {{actions:false}});
+</script>
 
 </body>
 </html>
@@ -484,7 +441,7 @@ img {{ max-width: 100%; }}
 
 
 # =========================================================
-# 9) 메인 UI 시작
+# 7) UI
 # =========================================================
 df = load_data()
 sh = gc.open_by_url(SPREADSHEET_URL)
@@ -492,7 +449,6 @@ ws = sh.sheet1
 ensure_sheet_columns(ws)
 
 st.sidebar.markdown("## ☁️ 천안공장 위생 점검 (Cloud)")
-
 menu = st.sidebar.radio(
     "메뉴",
     ["📊 대시보드", "📝 개선과제등록", "🗓️ 개선계획수립", "✅ 개선완료 입력", "📦 엑셀 출력", "🧾 보고서(주간/월간)"]
@@ -505,7 +461,7 @@ if st.sidebar.button("🔄 새로고침"):
 
 
 # =========================================================
-# A) 대시보드 (그래프 복구 + 안정)
+# A) 대시보드
 # =========================================================
 if menu == "📊 대시보드":
     st.markdown("### 📊 천안공장 위생점검 현황")
@@ -513,7 +469,6 @@ if menu == "📊 대시보드":
     if df.empty:
         st.warning("데이터가 없습니다.")
     else:
-        # 기간 필터
         st.sidebar.markdown("### 📅 기간 필터")
         years = sorted(df["Year"].dropna().unique().tolist())
         year_options = [int(y) for y in years]
@@ -536,7 +491,6 @@ if menu == "📊 대시보드":
         weeks = sorted(dff["Week"].dropna().unique().tolist())
         week_options = [f"{int(w)}주차" for w in weeks]
         selected_weeks_str = st.sidebar.multiselect("주차(Week)", week_options, default=week_options)
-
         if selected_weeks_str:
             selected_weeks = [int(x.replace("주차", "")) for x in selected_weeks_str]
             dff = dff[dff["Week"].isin(selected_weeks)]
@@ -549,9 +503,10 @@ if menu == "📊 대시보드":
         m1.metric("총 발굴 건수", f"{total_count}건")
         m2.metric("개선 완료", f"{done_count}건")
         m3.metric("개선율", f"{rate:.1f}%")
+
         st.divider()
 
-        # 그룹 기준: 월 여러개 선택이면 월별, 아니면 장소별
+        # 그룹 기준: 월 여러개면 월별, 아니면 장소별
         if len(selected_months) > 1:
             dff["_grp"] = dff["Month"].astype(int).astype(str) + "월"
             x_title = "월"
@@ -571,15 +526,14 @@ if menu == "📊 대시보드":
         chart_df["라벨"] = chart_df["완료율"].astype(str) + "%"
 
         c1, c2 = st.columns(2)
-
         with c1:
             st.markdown(f"**🔴 총 발생 건수 ({x_title}별)**")
-            chart1 = alt.Chart(chart_df).mark_bar().encode(
+            ch1 = alt.Chart(chart_df).mark_bar().encode(
                 x=alt.X("_grp:N", axis=alt.Axis(labelAngle=0, title=None)),
-                y=alt.Y("총발생:Q"),
+                y="총발생:Q",
                 tooltip=["_grp", "총발생"]
             )
-            st.altair_chart(chart1, use_container_width=True)
+            st.altair_chart(ch1, use_container_width=True)
 
         with c2:
             st.markdown(f"**🟢 완료율 (%) ({x_title}별)**")
@@ -593,23 +547,19 @@ if menu == "📊 대시보드":
 
         st.divider()
 
-        # 장소별 개선율 순위
         st.markdown("**🏆 장소별 개선율 순위**")
-        loc_stats = (
+        loc = (
             dff.groupby("공정")["진행상태"]
             .apply(lambda x: (x == "완료").mean() * 100)
             .reset_index(name="개선율(%)")
         )
-        loc_stats["개선율(%)"] = loc_stats["개선율(%)"].fillna(0).round(1)
-
-        st.dataframe(loc_stats.sort_values("개선율(%)", ascending=False), hide_index=True, use_container_width=True)
+        loc["개선율(%)"] = loc["개선율(%)"].fillna(0).round(1)
+        st.dataframe(loc.sort_values("개선율(%)", ascending=False), hide_index=True, use_container_width=True)
 
         st.divider()
+        st.subheader("📋 최근 10건(사진)")
 
-        # 최근 10건(사진)
-        st.subheader("📋 최근 10건")
         recent = dff.sort_values("일시", ascending=False).head(10)
-
         for _, r in recent.iterrows():
             date_str = r["일시"].strftime("%Y-%m-%d") if pd.notnull(r["일시"]) else ""
             icon = "✅" if r["진행상태"] == "완료" else "🟠" if r["진행상태"] in ["계획수립", "진행중"] else "🔥"
@@ -667,16 +617,15 @@ elif menu == "📝 개선과제등록":
                     loc,
                     iss,
                     finder,
-                    "",          # 담당자 (계획에서 지정)
+                    "",          # 담당자
                     "미배정",     # 진행상태
-                    "",          # 개선계획(일정)
+                    "",          # 개선계획
                     "",          # 개선내용
-                    "",          # 개선완료일
+                    "",          # 완료일
                     before_field,
                     ""
                 ])
             st.success("✅ 등록 완료!")
-            st.balloons()
             st.cache_data.clear()
             st.rerun()
 
@@ -727,12 +676,11 @@ elif menu == "🗓️ 개선계획수립":
                 ws.update_cell(r, col_index(ws, "진행상태"), status)
                 st.success("✅ 계획 저장 완료!")
                 st.cache_data.clear()
-                time.sleep(1)
                 st.rerun()
 
 
 # =========================================================
-# D) 개선완료 입력 (삭제/교체/Drive이전 포함)
+# D) 개선완료 입력 (다중사진/삭제/Drive이전)
 # =========================================================
 elif menu == "✅ 개선완료 입력":
     st.markdown("### ✅ 개선완료 입력")
@@ -779,7 +727,7 @@ elif menu == "✅ 개선완료 입력":
                 st.info(row.get("개선 필요사항", ""))
 
                 with st.expander("🧩 기존 Drive 사진을 Supabase로 이전(매칭)"):
-                    st.warning("Drive 파일이 서비스계정(haccp-bot)에게 공유되어 있어야 다운로드가 됩니다.")
+                    st.warning("Drive 파일이 서비스계정에 공유되어 있어야 다운로드가 됩니다.")
                     if st.button("사진_전 Drive→Supabase 이전"):
                         changed = migrate_drive_photos_to_supabase(ws, selected_id, "사진_전")
                         st.success("완료" if changed else "변경 없음(다운로드 불가 또는 이미 이전됨)")
@@ -791,7 +739,7 @@ elif menu == "✅ 개선완료 입력":
                         st.cache_data.clear()
                         st.rerun()
 
-                with st.expander("🗑️ 사진 삭제 (Supabase만 실제 삭제 가능)"):
+                with st.expander("🗑️ 사진 삭제 (Supabase는 실제 삭제)"):
                     del_target = st.selectbox("삭제 대상", ["사진_전", "사진_후"])
                     items = parse_photo_field(row.get(del_target, ""))
 
@@ -832,7 +780,6 @@ elif menu == "✅ 개선완료 입력":
                             cell = ws.find(str(selected_id))
                             r = cell.row
 
-                            # 후 사진: 기존 유지 + 추가 append
                             existing_after = ws.cell(r, col_index(ws, "사진_후")).value
                             existing_lines = [l.strip() for l in str(existing_after).splitlines() if l.strip()] if existing_after else []
                             new_after = upload_many("after", photos_after) if photos_after else ""
@@ -845,9 +792,7 @@ elif menu == "✅ 개선완료 입력":
                             ws.update_cell(r, col_index(ws, "진행상태"), "완료" if mark_done else "진행중")
 
                         st.success("✅ 저장 완료!")
-                        st.balloons()
                         st.cache_data.clear()
-                        time.sleep(1)
                         st.rerun()
 
 
@@ -865,13 +810,12 @@ elif menu == "📦 엑셀 출력":
             default=sorted(df["진행상태"].unique().tolist())
         )
         dff = df[df["진행상태"].isin(status_filter)].copy()
+        st.caption("엑셀에는 사진이 너무 많으면 문제가 생길 수 있어 **전/후 첫 장만 삽입**합니다.")
 
-        st.caption("엑셀에는 사진이 너무 크면 문제가 되므로 **전/후 첫 장만** 썸네일로 삽입됩니다.")
         if st.button("엑셀 생성"):
             with st.spinner("엑셀 생성 중..."):
                 dff2 = dff.copy()
-                if "일시" in dff2.columns:
-                    dff2["일시"] = dff2["일시"].dt.strftime("%Y-%m-%d")
+                dff2["일시"] = dff2["일시"].dt.strftime("%Y-%m-%d")
                 bio = build_excel_with_images(dff2[REQUIRED_COLUMNS])
                 st.download_button(
                     "⬇️ 다운로드",
@@ -881,73 +825,63 @@ elif menu == "📦 엑셀 출력":
                 )
 
 
-# # =========================================================
-# # F) 보고서(주간/월간/기간)
-# # =========================================================
-# elif menu == "🧾 보고서(주간/월간)":
-#     st.markdown("### 🧾 보고서 출력 (주간/월간/기간 선택)")
-#     if df.empty:
-#         st.info("데이터가 없습니다.")
-#     else:
-#         mode = st.radio("보고서 단위", ["주간", "월간", "기간(직접선택)"], horizontal=True)
+# =========================================================
+# F) 보고서(주간/월간/기간) - HTML(그래프 포함)
+# =========================================================
+elif menu == "🧾 보고서(주간/월간)":
+    st.markdown("### 🧾 보고서 출력 (주간/월간/기간 선택)")
 
-#         dff = df.copy()
+    if df.empty:
+        st.info("데이터가 없습니다.")
+    else:
+        mode = st.radio("보고서 단위", ["주간", "월간", "기간(직접선택)"], horizontal=True)
+        dff = df.copy()
 
-#         # 기간 선택
-#         if mode == "주간":
-#             years = sorted(dff["Year"].dropna().unique().tolist())
-#             y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
-#             tmp = dff[dff["Year"] == y]
-#             weeks = sorted(tmp["Week"].dropna().unique().tolist())
-#             w = st.selectbox("주차(ISO Week)", weeks, index=len(weeks) - 1 if weeks else 0)
-#             df_period = dff[(dff["Year"] == y) & (dff["Week"] == w)].copy()
-#             period_text = f"{y}년 {w}주차"
+        if mode == "주간":
+            years = sorted(dff["Year"].dropna().unique().tolist())
+            y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
+            tmp = dff[dff["Year"] == y]
+            weeks = sorted(tmp["Week"].dropna().unique().tolist())
+            w = st.selectbox("주차(ISO Week)", weeks, index=len(weeks) - 1 if weeks else 0)
+            df_period = dff[(dff["Year"] == y) & (dff["Week"] == w)].copy()
+            period_text = f"{y}년 {w}주차"
 
-#         elif mode == "월간":
-#             years = sorted(dff["Year"].dropna().unique().tolist())
-#             y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
-#             tmp = dff[dff["Year"] == y]
-#             months = sorted(tmp["Month"].dropna().unique().tolist())
-#             m = st.selectbox("월", months, index=len(months) - 1 if months else 0)
-#             df_period = dff[(dff["Year"] == y) & (dff["Month"] == m)].copy()
-#             period_text = f"{y}년 {m}월"
+        elif mode == "월간":
+            years = sorted(dff["Year"].dropna().unique().tolist())
+            y = st.selectbox("연도", years, index=len(years) - 1 if years else 0)
+            tmp = dff[dff["Year"] == y]
+            months = sorted(tmp["Month"].dropna().unique().tolist())
+            m = st.selectbox("월", months, index=len(months) - 1 if months else 0)
+            df_period = dff[(dff["Year"] == y) & (dff["Month"] == m)].copy()
+            period_text = f"{y}년 {m}월"
 
-#         else:
-#             start = st.date_input("시작일", value=date.today().replace(day=1))
-#             end = st.date_input("종료일", value=date.today())
-#             df_period = dff[(dff["일시"] >= pd.to_datetime(start)) & (dff["일시"] <= pd.to_datetime(end))].copy()
-#             period_text = f"{start} ~ {end}"
+        else:
+            start = st.date_input("시작일", value=date.today().replace(day=1))
+            end = st.date_input("종료일", value=date.today())
+            df_period = dff[(dff["일시"] >= pd.to_datetime(start)) & (dff["일시"] <= pd.to_datetime(end))].copy()
+            period_text = f"{start} ~ {end}"
 
-#         # 미리보기 KPI/그래프/표
-#         total, done, rate = make_summary(df_period)
-#         st.info(f"기간: {period_text} | 총 발굴 {total}건 / 개선완료 {done}건 / 개선율 {rate}%")
+        total = len(df_period)
+        done = int((df_period["진행상태"] == "완료").sum()) if total else 0
+        rate = round(done / total * 100, 1) if total else 0.0
 
-#         room_df = make_room_stats(df_period)
+        st.info(f"기간: {period_text} | 총 발굴 {total}건 / 개선완료 {done}건 / 개선율 {rate}%")
 
-#         c1, c2 = st.columns(2)
-#         with c1:
-#             st.markdown("**총 발굴 vs 개선완료**")
-#             fig = plot_counts(total, done, title="총 발굴 vs 개선완료")
-#             st.pyplot(fig)
-#         with c2:
-#             st.markdown("**실/장소별 발굴/완료 (상위 12)**")
-#             fig = plot_room_bars(room_df, title="실/장소별 발굴/완료 (상위 12)")
-#             st.pyplot(fig)
+        # 화면 미리보기 그래프(Altair)
+        chart1_df = pd.DataFrame([{"항목": "총 발굴", "건수": total}, {"항목": "개선완료", "건수": done}])
+        ch1 = alt.Chart(chart1_df).mark_bar().encode(x="항목:N", y="건수:Q", tooltip=["항목", "건수"]).properties(title="총 발굴 vs 개선완료")
+        st.altair_chart(ch1, use_container_width=True)
 
-#         st.markdown("**실/장소별 요약**")
-#         st.dataframe(room_df, hide_index=True, use_container_width=True)
+        rs = room_stats(df_period)
+        st.dataframe(rs, hide_index=True, use_container_width=True)
 
-#         st.divider()
+        st.divider()
 
-#         # 보고서 다운로드(HTML)
-#         report_title = "천안공장 위생점검 보고서"
-#         html = build_report_html(report_title, period_text, df_period)
-
-#         st.download_button(
-#             "⬇️ 보고서 다운로드 (HTML)",
-#             data=html.encode("utf-8"),
-#             file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
-#             mime="text/html"
-#         )
-
-        st.caption("HTML 파일은 브라우저에서 열어 인쇄(PDF 저장)하면 보고서로 바로 제출 가능합니다.")
+        html = build_report_html("천안공장 위생점검 보고서", period_text, df_period)
+        st.download_button(
+            "⬇️ 보고서 다운로드 (HTML)",
+            data=html.encode("utf-8"),
+            file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+            mime="text/html"
+        )
+        st.caption("HTML을 열어서 인쇄 → PDF 저장하면 ‘보고서’로 바로 제출 가능합니다.")
