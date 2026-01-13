@@ -3,18 +3,15 @@ import pandas as pd
 import gspread
 import time
 import xlsxwriter
-import io
+import io  # 엑셀 다운로드를 위해 꼭 필요합니다
 import altair as alt
 from datetime import datetime
-# from PIL import Image, ImageOps  <-- 이 줄 삭제됨 (에러 원인)
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 # --- 1. 환경 설정 ---
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1BcMaaKnZG9q4qabwR1moRiE_QyC04jU3dZYR7grHQsc/edit?gid=0#gid=0"
-
-# 👇 [중요] 구글 드라이브 폴더 주소창 맨 뒤에 있는 ID
 DRIVE_FOLDER_ID = "117a_UMGDl6YoF8J32a6Y3uwkvl30JClG" 
 
 # [권한 설정]
@@ -34,7 +31,6 @@ def connect_google_final():
 
     try:
         key_dict = dict(st.secrets["google_key_json"])
-        
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=SCOPES
         )
@@ -84,33 +80,35 @@ def download_image_bytes(_drive_service, file_link):
             file_id = file_link.split("id=")[1].split("&")[0]
         else:
             return None
-
         return _drive_service.files().get_media(fileId=file_id).execute()
     except:
         return None
 
-# [삭제됨] compress_image 함수 삭제 (502 에러 원인)
-
-# [공통] 사진 업로드 (수정됨: 압축 없이 원본 업로드)
+# [공통] 사진 업로드 (압축 없이 원본 업로드)
 def upload_photo(drive_service, uploaded_file):
     if uploaded_file is None: return ""
-    
-    # 압축 과정 없이 바로 업로드 정보 생성
-    file_metadata = {
-        'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 
-        'parents': [DRIVE_FOLDER_ID]
-    }
-    
-    # 원본 파일 그대로 업로드 (mimetype 자동 인식)
-    media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
-    
-    file = drive_service.files().create(
-        body=file_metadata, 
-        media_body=media, 
-        fields='id, webViewLink'
-    ).execute()
-    
-    return file.get('webViewLink')
+    try:
+        file_metadata = {
+            'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 
+            'parents': [DRIVE_FOLDER_ID]
+        }
+        media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
+        file = drive_service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id, webViewLink'
+        ).execute()
+        return file.get('webViewLink')
+    except Exception as e:
+        st.error(f"사진 업로드 실패: {e}")
+        return ""
+
+# [기능 추가] 엑셀 다운로드용 변환 함수
+def convert_df_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sheet1')
+    return output.getvalue()
 
 def process_and_upload(gc, uploaded_file):
     try:
@@ -207,6 +205,19 @@ if st.sidebar.button("🔄 새로고침"): st.rerun()
 
 if menu == "📊 대시보드":
     st.markdown("### 📊 천안공장 위생점검 현황")
+    
+    # [복구됨] 엑셀 다운로드 버튼
+    if not df.empty:
+        col_btn, _ = st.columns([1, 4])
+        with col_btn:
+            excel_data = convert_df_to_excel(df)
+            st.download_button(
+                label="💾 전체 데이터 다운로드 (Excel)",
+                data=excel_data,
+                file_name=f"위생점검_데이터_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
     if df.empty:
         st.warning("데이터가 없습니다.")
     else:
