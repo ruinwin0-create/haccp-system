@@ -32,8 +32,6 @@ def connect_google_final():
 
     try:
         key_dict = dict(st.secrets["google_key_json"])
-        # 연결 성공 여부 확인용 (사이드바에 표시)
-        st.sidebar.success(f"시스템 연결됨: {key_dict.get('client_email')}")
         
         creds = service_account.Credentials.from_service_account_info(
             key_dict, scopes=SCOPES
@@ -68,6 +66,7 @@ def load_data(_gc):
 
         return df
     except Exception as e:
+        st.error(f"데이터 로딩 실패: {e}")
         return pd.DataFrame()
 
 # [공통] 사진 다운로드 함수
@@ -88,20 +87,18 @@ def download_image_bytes(_drive_service, file_link):
     except:
         return None
 
-# [공통] 사진 업로드 (압축 없이 원본 그대로 업로드)
+# [공통] 사진 업로드 (압축 제거 -> 원본 업로드)
 def upload_photo(drive_service, uploaded_file):
     if uploaded_file is None: return ""
     
+    # 2. 압축 과정 삭제됨 -> 바로 업로드 준비
     try:
-        # 파일 이름에 날짜 시간 붙여서 중복 방지
-        file_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
-        
         file_metadata = {
-            'name': file_name, 
+            'name': f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}", 
             'parents': [DRIVE_FOLDER_ID]
         }
         
-        # 압축 과정 없이 바로 업로드
+        # 파일 형식 그대로 인식해서 업로드
         media = MediaIoBaseUpload(uploaded_file, mimetype=uploaded_file.type)
         
         file = drive_service.files().create(
@@ -112,7 +109,6 @@ def upload_photo(drive_service, uploaded_file):
         
         return file.get('webViewLink')
     except Exception as e:
-        # 업로드 실패시 에러 메시지 반환
         st.error(f"사진 업로드 실패: {e}")
         return ""
 
@@ -310,7 +306,6 @@ elif menu == "📝 문제 등록":
         pho = st.file_uploader("사진")
         if st.form_submit_button("저장"):
             with st.spinner('저장 중...'):
-                # 압축 없이 업로드 호출
                 lnk = upload_photo(drive_service, pho)
                 sh = gc.open_by_url(SPREADSHEET_URL)
                 new_id = int(time.time())
@@ -359,7 +354,6 @@ elif menu == "🛠️ 조치 입력":
                     else:
                         try:
                             with st.spinner('저장 중...'):
-                                # 압축 없이 업로드 호출
                                 lnk = upload_photo(drive_service, aph) if aph else ""
                                 sh = gc.open_by_url(SPREADSHEET_URL)
                                 ws = sh.sheet1
